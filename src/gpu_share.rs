@@ -29,6 +29,13 @@ pub struct GpuShare {
 }
 
 pub fn create(device: &wgpu::Device, width: u32, height: u32) -> Result<GpuShare, String> {
+    // Source-level compatibility switch. Returning an ordinary setup failure
+    // makes the existing render/capture state machine set gpu_disabled=true
+    // and use its built-in CPU upload path without binary patching.
+    if cfg!(feature = "cpu-compat") {
+        return Err("CPU compatibility mode enabled".into());
+    }
+
     // Pull the raw ID3D12Device out of wgpu. None => not the DX12 backend.
     let raw = unsafe {
         device.as_hal::<wgpu::hal::api::Dx12, _, _>(|hal| {

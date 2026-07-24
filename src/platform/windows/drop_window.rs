@@ -1,13 +1,9 @@
-use super::ole_drop_target::OleDropTarget;
 use super::{EventSender, PlatformEvent};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
-use windows::core::{w, ComObject};
+use windows::core::w;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Ole::{
-    IDropTarget, OleInitialize, OleUninitialize, RegisterDragDrop, RevokeDragDrop,
-};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetCapture, ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetWindowRect, RegisterClassW,
@@ -22,24 +18,25 @@ static EVENT_SENDER: OnceLock<EventSender> = OnceLock::new();
 static DRAG_OFFSET: Mutex<Option<[i32; 2]>> = Mutex::new(None);
 static WIDGET_DRAG_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// Small invisible mouse interaction window used only to reposition the hole.
+///
+/// Visual-only build: this window is deliberately NOT registered as an OLE
+/// file-drop target, so dropping files on the black hole has no effect.
 pub struct DropWindow {
     hwnd: HWND,
-    _target: IDropTarget,
-    ole_initialized: bool,
     enabled: bool,
 }
 
 impl DropWindow {
     pub fn new(sender: EventSender) -> windows::core::Result<Self> {
         EVENT_SENDER.get_or_init(|| sender.clone());
-        let ole_initialized = unsafe { OleInitialize(None) }.is_ok();
         register_class()?;
         let instance = unsafe { GetModuleHandleW(None)? };
         let hwnd = unsafe {
             CreateWindowExW(
                 WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
-                w!("BlackHoleTrashDropTarget"),
-                w!("Black Hole Trash Drop Target"),
+                w!("BlackHoleTrashMoveTarget"),
+                w!("Black Hole Visual Move Target"),
                 WS_POPUP,
                 0,
                 0,
@@ -54,14 +51,8 @@ impl DropWindow {
         unsafe {
             SetLayeredWindowAttributes(hwnd, Default::default(), 1, LWA_ALPHA)?;
         }
-        let target: IDropTarget = ComObject::new(OleDropTarget::new(hwnd, sender)).into_interface();
-        unsafe {
-            RegisterDragDrop(hwnd, &target)?;
-        }
         Ok(Self {
             hwnd,
-            _target: target,
-            ole_initialized,
             enabled: false,
         })
     }
@@ -106,11 +97,7 @@ impl Drop for DropWindow {
     fn drop(&mut self) {
         WIDGET_DRAG_ACTIVE.store(false, Ordering::Release);
         unsafe {
-            let _ = RevokeDragDrop(self.hwnd);
             let _ = DestroyWindow(self.hwnd);
-            if self.ole_initialized {
-                OleUninitialize();
-            }
         }
     }
 }
@@ -125,7 +112,7 @@ fn register_class() -> windows::core::Result<()> {
         style: CS_HREDRAW | CS_VREDRAW,
         lpfnWndProc: Some(window_proc),
         hInstance: HINSTANCE(module.0),
-        lpszClassName: w!("BlackHoleTrashDropTarget"),
+        lpszClassName: w!("BlackHoleTrashMoveTarget"),
         ..Default::default()
     };
     let atom = unsafe { RegisterClassW(&class) };
