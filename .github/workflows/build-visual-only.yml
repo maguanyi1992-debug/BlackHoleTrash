@@ -1,4 +1,4 @@
-name: Build visual-only Windows executables
+name: Build visual-only anti-feedback Windows executables
 
 on:
   workflow_dispatch:
@@ -25,22 +25,75 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
 
-      - name: Build standard version
+      - name: Apply anti-feedback source fix
         shell: pwsh
         run: |
-          cargo build --release 
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item target/release/BlackHoleTrash.exe dist/BlackHoleTrash-VisualOnly.exe
+          $path = "src/main.rs"
+          $text = Get-Content $path -Raw
 
-      - name: Build CPU compatibility version
+          # 1. Apply capture exclusion before the capture thread starts.
+          $startupPattern = '(?ms)^\s*#\[cfg\(any\(windows, target_os = "macos"\)\)\]\r?\n\s*capture::start\(shared\.clone\(\), mon_index\);\r?\n\r?\n\s*// overlay styles only after the swapchain exists \(layered-window\r?\n\s*// rule\); the window is still hidden at this point\r?\n\s*let _ = window\.set_cursor_hittest\(false\);\r?\n\s*#\[cfg\(any\(windows, target_os = "macos"\)\)\]\r?\n\s*set_capture_exclusion\(&window, true\);'
+          $startupReplacement = @'
+            // Apply capture exclusion before starting the capture session.
+            // This prevents the overlay from entering the first captured frames.
+            let _ = window.set_cursor_hittest(false);
+            #[cfg(any(windows, target_os = "macos"))]
+            {
+                set_capture_exclusion(&window, true);
+                std::thread::sleep(std::time::Duration::from_millis(150));
+            }
+
+            #[cfg(any(windows, target_os = "macos"))]
+            capture::start(shared.clone(), mon_index);
+'@
+          $patched = [regex]::Replace($text, $startupPattern, $startupReplacement, 1)
+          if ($patched -eq $text) {
+            throw "Startup anti-feedback patch target was not found"
+          }
+          $text = $patched
+
+          # 2. Re-apply exclusion after the hidden overlay is made visible.
+          $showPattern = '(?ms)(\s*pane\.window\.set_window_level\(WindowLevel::AlwaysOnTop\);\r?\n)(\s*pane\.visible = true;)'
+          $showReplacement = @'
+$1                    // Some Windows systems clear display affinity when a hidden
+                    // layered window becomes visible, so assert it again here.
+                    #[cfg(any(windows, target_os = "macos"))]
+                    set_capture_exclusion(&pane.window, true);
+$2
+'@
+          $patched = [regex]::Replace($text, $showPattern, $showReplacement, 1)
+          if ($patched -eq $text) {
+            throw "Visibility anti-feedback patch target was not found"
+          }
+
+          Set-Content -Path $path -Value $patched -Encoding utf8NoBOM
+
+      - name: Build standard anti-feedback version
+        shell: pwsh
+        run: |
+          cargo build --release
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/BlackHoleTrash.exe dist/BlackHoleTrash-VisualOnly-AntiFeedback.exe
+
+      - name: Build CPU anti-feedback version
         shell: pwsh
         run: |
           cargo build --release --features cpu-compat
-          Copy-Item target/release/BlackHoleTrash.exe dist/BlackHoleTrash-VisualOnly-CPU-Compat.exe
+          Copy-Item target/release/BlackHoleTrash.exe dist/BlackHoleTrash-VisualOnly-CPU-AntiFeedback.exe
+
+      - name: Create SHA-256 checksums
+        shell: pwsh
+        run: |
+          Get-FileHash dist/BlackHoleTrash-VisualOnly-AntiFeedback.exe -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  BlackHoleTrash-VisualOnly-AntiFeedback.exe" } |
+            Set-Content dist/BlackHoleTrash-VisualOnly-AntiFeedback.exe.sha256
+          Get-FileHash dist/BlackHoleTrash-VisualOnly-CPU-AntiFeedback.exe -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  BlackHoleTrash-VisualOnly-CPU-AntiFeedback.exe" } |
+            Set-Content dist/BlackHoleTrash-VisualOnly-CPU-AntiFeedback.exe.sha256
 
       - name: Upload executables
         uses: actions/upload-artifact@v4
         with:
-          name: BlackHoleTrash-VisualOnly-Windows-x64
+          name: BlackHoleTrash-VisualOnly-AntiFeedback-Windows-x64
           path: dist/*
           if-no-files-found: error
