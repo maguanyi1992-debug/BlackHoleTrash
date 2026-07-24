@@ -28,14 +28,14 @@ jobs:
       - name: Build standard version
         shell: pwsh
         run: |
-          cargo build --release --locked
+          cargo build --release 
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item target/release/BlackHoleTrash.exe dist/BlackHoleTrash-VisualOnly.exe
 
       - name: Build CPU compatibility version
         shell: pwsh
         run: |
-          cargo build --release --locked --features cpu-compat
+          cargo build --release --features cpu-compat
           Copy-Item target/release/BlackHoleTrash.exe dist/BlackHoleTrash-VisualOnly-CPU-Compat.exe
 
       - name: Upload executables
