@@ -26,47 +26,54 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Apply anti-feedback source fix
-        shell: pwsh
+        shell: python
         run: |
-          $path = "src/main.rs"
-          $text = Get-Content $path -Raw
+          from pathlib import Path
 
-          # 1. Apply capture exclusion before the capture thread starts.
-          $startupPattern = '(?ms)^\s*#\[cfg\(any\(windows, target_os = "macos"\)\)\]\r?\n\s*capture::start\(shared\.clone\(\), mon_index\);\r?\n\r?\n\s*// overlay styles only after the swapchain exists \(layered-window\r?\n\s*// rule\); the window is still hidden at this point\r?\n\s*let _ = window\.set_cursor_hittest\(false\);\r?\n\s*#\[cfg\(any\(windows, target_os = "macos"\)\)\]\r?\n\s*set_capture_exclusion\(&window, true\);'
-          $startupReplacement = @'
-            // Apply capture exclusion before starting the capture session.
-            // This prevents the overlay from entering the first captured frames.
-            let _ = window.set_cursor_hittest(false);
-            #[cfg(any(windows, target_os = "macos"))]
-            {
-                set_capture_exclusion(&window, true);
-                std::thread::sleep(std::time::Duration::from_millis(150));
-            }
+          path = Path("src/main.rs")
+          text = path.read_text(encoding="utf-8")
 
-            #[cfg(any(windows, target_os = "macos"))]
-            capture::start(shared.clone(), mon_index);
-'@
-          $patched = [regex]::Replace($text, $startupPattern, $startupReplacement, 1)
-          if ($patched -eq $text) {
-            throw "Startup anti-feedback patch target was not found"
-          }
-          $text = $patched
+          old_startup = """            #[cfg(any(windows, target_os = "macos"))]
+                      capture::start(shared.clone(), mon_index);
 
-          # 2. Re-apply exclusion after the hidden overlay is made visible.
-          $showPattern = '(?ms)(\s*pane\.window\.set_window_level\(WindowLevel::AlwaysOnTop\);\r?\n)(\s*pane\.visible = true;)'
-          $showReplacement = @'
-$1                    // Some Windows systems clear display affinity when a hidden
-                    // layered window becomes visible, so assert it again here.
-                    #[cfg(any(windows, target_os = "macos"))]
-                    set_capture_exclusion(&pane.window, true);
-$2
-'@
-          $patched = [regex]::Replace($text, $showPattern, $showReplacement, 1)
-          if ($patched -eq $text) {
-            throw "Visibility anti-feedback patch target was not found"
-          }
+                      // overlay styles only after the swapchain exists (layered-window
+                      // rule); the window is still hidden at this point
+                      let _ = window.set_cursor_hittest(false);
+                      #[cfg(any(windows, target_os = "macos"))]
+                      set_capture_exclusion(&window, true);
+          """
 
-          Set-Content -Path $path -Value $patched -Encoding utf8NoBOM
+          new_startup = """            // Apply capture exclusion before the capture session starts.
+                      let _ = window.set_cursor_hittest(false);
+                      #[cfg(any(windows, target_os = "macos"))]
+                      {
+                          set_capture_exclusion(&window, true);
+                          std::thread::sleep(std::time::Duration::from_millis(150));
+                      }
+
+                      #[cfg(any(windows, target_os = "macos"))]
+                      capture::start(shared.clone(), mon_index);
+          """
+
+          if old_startup not in text:
+              raise SystemExit("Startup patch target not found in src/main.rs")
+          text = text.replace(old_startup, new_startup, 1)
+
+          old_show = """                    pane.window.set_window_level(WindowLevel::AlwaysOnTop);
+                              pane.visible = true;
+          """
+
+          new_show = """                    pane.window.set_window_level(WindowLevel::AlwaysOnTop);
+                              #[cfg(any(windows, target_os = "macos"))]
+                              set_capture_exclusion(&pane.window, true);
+                              pane.visible = true;
+          """
+
+          if old_show not in text:
+              raise SystemExit("Visibility patch target not found in src/main.rs")
+          text = text.replace(old_show, new_show, 1)
+
+          path.write_text(text, encoding="utf-8", newline="\n")
 
       - name: Build standard anti-feedback version
         shell: pwsh
